@@ -1,0 +1,711 @@
+/*
+ * BedWars2023 - A bed wars mini-game.
+ * Copyright (C) 2024 Tomas Keuper
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * Contact e-mail: contact@fyreblox.com
+ */
+
+package com.tomkeuper.bedwars.listeners;
+
+import com.tomkeuper.bedwars.BedWars;
+import com.tomkeuper.bedwars.api.arena.GameState;
+import com.tomkeuper.bedwars.api.arena.IArena;
+import com.tomkeuper.bedwars.api.arena.team.ITeam;
+import com.tomkeuper.bedwars.api.arena.team.TeamColor;
+import com.tomkeuper.bedwars.api.configuration.ConfigPath;
+import com.tomkeuper.bedwars.api.events.gameplay.PopUpTowerPlaceEvent;
+import com.tomkeuper.bedwars.api.events.player.PlayerBedBreakEvent;
+import com.tomkeuper.bedwars.api.language.Language;
+import com.tomkeuper.bedwars.api.language.Messages;
+import com.tomkeuper.bedwars.api.region.Region;
+import com.tomkeuper.bedwars.api.server.ServerType;
+import com.tomkeuper.bedwars.arena.Arena;
+import com.tomkeuper.bedwars.configuration.Sounds;
+import com.tomkeuper.bedwars.support.paper.PaperSupport;
+import com.tomkeuper.bedwars.popuptower.TowerEast;
+import com.tomkeuper.bedwars.popuptower.TowerNorth;
+import com.tomkeuper.bedwars.popuptower.TowerSouth;
+import com.tomkeuper.bedwars.popuptower.TowerWest;
+import org.bukkit.*;
+import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
+import org.bukkit.block.Sign;
+import org.bukkit.entity.EntityType;
+import org.bukkit.entity.Player;
+import org.bukkit.entity.TNTPrimed;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.block.*;
+import org.bukkit.event.entity.EntityChangeBlockEvent;
+import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.entity.ItemSpawnEvent;
+import org.bukkit.event.hanging.HangingBreakByEntityEvent;
+import org.bukkit.event.player.PlayerBucketEmptyEvent;
+import org.bukkit.event.player.PlayerBucketFillEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.material.Bed;
+import org.bukkit.metadata.MetadataValueAdapter;
+import org.bukkit.plugin.Plugin;
+import org.bukkit.scheduler.BukkitRunnable;
+import org.jetbrains.annotations.NotNull;
+
+import java.io.File;
+import java.util.*;
+import java.util.logging.Logger;
+
+import static com.tomkeuper.bedwars.BedWars.*;
+import static com.tomkeuper.bedwars.api.language.Language.getMsg;
+
+public class BreakPlace implements Listener {
+
+    private static final List<Player> buildSession = new ArrayList<>();
+    private final boolean allowFireBreak;
+
+    public BreakPlace() {
+        allowFireBreak = config.getBoolean(ConfigPath.GENERAL_CONFIGURATION_ALLOW_FIRE_EXTINGUISH);
+    }
+
+    @EventHandler
+    public void onIceMelt(BlockFadeEvent e) {
+        if (BedWars.getServerType() == ServerType.MULTIARENA) {
+            if (Objects.requireNonNull(e.getBlock().getLocation().getWorld()).getName().equalsIgnoreCase(BedWars.getLobbyWorld())) {
+                e.setCancelled(true);
+                return;
+            }
+        }
+        if (e.getBlock().getType() == Material.ICE) {
+            if (Arena.getArenaByIdentifier(e.getBlock().getWorld().getName()) != null) e.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onCactus(BlockPhysicsEvent e) {
+        if (e.getBlock().getType() == Material.CACTUS) {
+            if (Arena.getArenaByIdentifier(e.getBlock().getWorld().getName()) != null) e.setCancelled(true);
+        }
+    }
+
+
+    @EventHandler(ignoreCancelled = true)
+    public void onBurn(@NotNull BlockBurnEvent event) {
+        IArena arena = Arena.getArenaByIdentifier(event.getBlock().getWorld().getName());
+        if (arena == null) return;
+        if (!arena.isAllowMapBreak()) {
+            event.setCancelled(true);
+            return;
+        }
+        if (arena.isTeamBed(event.getBlock().getLocation())){
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onBlockPlace(BlockPlaceEvent e) {
+        if (e.isCancelled()) return;
+
+        //Prevent player from placing during the removal from the arena
+        IArena arena = Arena.getArenaByIdentifier(e.getBlock().getWorld().getName());
+        if (arena != null) {
+            if (arena.getStatus() != GameState.playing) {
+                e.setCancelled(true);
+                return;
+            }
+            if (e.getItemInHand().getType().equals(nms.materialFireball()) && e.getBlockPlaced().getType().equals(Material.FIRE)) {
+                e.setCancelled(true);
+            }
+        }
+        Player p = e.getPlayer();
+        IArena a = Arena.getArenaByPlayer(p);
+        if (a != null) {
+            if (a.isSpectator(p)) {
+                e.setCancelled(true);
+                return;
+            }
+            if (a.getRespawnSessions().containsKey(p)) {
+                e.setCancelled(true);
+                return;
+            }
+            if (a.getStatus() != GameState.playing) {
+                e.setCancelled(true);
+                return;
+            }
+            if (e.getBlockPlaced().getLocation().getBlockY() >= a.getConfig().getInt(ConfigPath.ARENA_CONFIGURATION_MAX_BUILD_Y)) {
+                e.setCancelled(true);
+                e.getPlayer().sendMessage(getMsg(e.getPlayer(), Messages.ARENA_MAX_BUILD_LIMIT_REACHED));
+                return;
+            }
+            if (e.getBlockPlaced().getLocation().getBlockY() <= a.getConfig().getInt(ConfigPath.ARENA_CONFIGURATION_MIN_BUILD_Y)) {
+                e.setCancelled(true);
+                e.getPlayer().sendMessage(getMsg(e.getPlayer(), Messages.ARENA_MIN_BUILD_LIMIT_REACHED));
+                return;
+            }
+
+            for (Region r : a.getRegionsList()) {
+                if (r.isInRegion(e.getBlock().getLocation()) && r.isProtected()) {
+                    e.setCancelled(true);
+                    p.sendMessage(getMsg(p, Messages.INTERACT_CANNOT_PLACE_BLOCK));
+                    return;
+                }
+            }
+
+            // prevent modifying wood if protected
+            // issue #531
+            if (e.getBlockPlaced().getType().toString().contains("STRIPPED_") && e.getBlock().getType().toString().contains("_WOOD")) {
+                if (null != arena && !arena.isAllowMapBreak()) {
+                    e.setCancelled(true);
+                    return;
+                }
+            }
+
+            a.addPlacedBlock(e.getBlock());
+            if (e.getBlock().getType() == Material.TNT) {
+                if (config.getBoolean(ConfigPath.GENERAL_TNT_AUTO_IGNITE)) {
+                    e.getBlockPlaced().setType(Material.AIR);
+                    TNTPrimed tnt = Objects.requireNonNull(e.getBlock().getLocation().getWorld()).spawn(e.getBlock().getLocation().add(0.5, 0, 0.5), TNTPrimed.class);
+                    tnt.setFuseTicks(config.getInt(ConfigPath.GENERAL_TNT_FUSE_TICKS));
+                    nms.setSource(tnt, p);
+                    return;
+                }
+            } else if (BedWars.shop.getBoolean(ConfigPath.SHOP_SPECIAL_TOWER_ENABLE)) {
+                if (e.getBlock().getType() == Material.valueOf(shop.getString(ConfigPath.SHOP_SPECIAL_TOWER_MATERIAL))) {
+
+                    Location loc = e.getBlock().getLocation();
+                    IArena a1 = Arena.getArenaByPlayer(p);
+                    TeamColor col = a1.getTeam(p).getColor();
+                    Block block = loc.getWorld().getBlockAt(loc.clone().subtract(0, -1, 0));
+
+                    PopUpTowerPlaceEvent event = new PopUpTowerPlaceEvent(p, loc, block, a1);
+                    Bukkit.getPluginManager().callEvent(event);
+                    if (event.isCancelled()) {
+                        e.setCancelled(true);
+                        return;
+                    }
+                    // Let vanilla placement consume the item, then immediately clear the placed block to avoid leftover chest
+                    e.getBlockPlaced().setType(Material.AIR);
+
+                    double rotation = (p.getLocation().getYaw() - 90.0F) % 360.0F;
+                    if (rotation < 0.0D) {
+                        rotation += 360.0D;
+                    }
+                    if (45.0D <= rotation && rotation < 135.0D) {
+                        new TowerSouth(event.getLocation(), e.getBlockPlaced(), col, p);
+                    } else if (225.0D <= rotation && rotation < 315.0D) {
+                        new TowerNorth(event.getLocation(), e.getBlockPlaced(), col, p);
+                    } else if (135.0D <= rotation && rotation < 225.0D) {
+                        new TowerWest(event.getLocation(), e.getBlockPlaced(), col, p);
+                    } else if (0.0D <= rotation && rotation < 45.0D) {
+                        new TowerEast(event.getLocation(), e.getBlockPlaced(), col, p);
+                    } else if (315.0D <= rotation && rotation < 360.0D) {
+                        new TowerEast(event.getLocation(), e.getBlockPlaced(), col, p);
+                    }
+                }
+            }
+            return;
+        }
+        if (BedWars.getServerType() == ServerType.MULTIARENA) {
+            if (Objects.requireNonNull(e.getBlock().getLocation().getWorld()).getName().equalsIgnoreCase(BedWars.getLobbyWorld())) {
+                if (!isBuildSession(p)) {
+                    e.setCancelled(true);
+                }
+            }
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true)
+    public void onInteract(PlayerInteractEvent event) {
+        Player player = event.getPlayer();
+        if (BedWars.getServerType() == ServerType.MULTIARENA
+                && player.getWorld().getName().equalsIgnoreCase(BedWars.getLobbyWorld())) {
+            if (event.getClickedBlock() != null && event.getClickedBlock().getRelative(BlockFace.UP).getType() == Material.FIRE) {
+                if (!isBuildSession(player)) {
+                    event.setCancelled(true);
+                    //return;
+                }
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onBlockBreakMonitor(BlockBreakEvent event) {
+        IArena a = Arena.getArenaByPlayer(event.getPlayer());
+        if (a != null) {
+            a.removePlacedBlock(event.getBlock());
+        }
+    }
+
+    @EventHandler
+    public void onBlockDrop(ItemSpawnEvent event) {
+        // Cancel drops for certain items we don't want in arenas (beds, seeds, sugar cane)
+        IArena arena = Arena.getArenaByIdentifier(event.getEntity().getWorld().getName());
+        if (arena == null) return;
+        Material material = event.getEntity().getItemStack().getType();
+        String matName = material.toString();
+        if (
+                nms.isBed(material)
+                || matName.equalsIgnoreCase("SEEDS")
+                || matName.equalsIgnoreCase("WHEAT_SEEDS")
+                || matName.equalsIgnoreCase("SUGAR_CANE")
+                || matName.equalsIgnoreCase("SUGAR_CANE_BLOCK")
+                || matName.equalsIgnoreCase("RED_MUSHROOM")
+                || matName.equalsIgnoreCase("BROWN_MUSHROOM")
+        ) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onWaterFlow(BlockFromToEvent event) {
+        // Cancel water flow if it tries to break a block into a protected region
+        IArena arena = Arena.getArenaByIdentifier(event.getBlock().getWorld().getName());
+        if (arena == null) return;
+        if (!event.getBlock().getType().toString().equalsIgnoreCase("WATER")) return;
+        if (event.getToBlock().isEmpty()) return;
+        for (Region region : arena.getRegionsList()) {
+            if (region.isInRegion(event.getToBlock().getLocation()) && region.isProtected()) {
+                event.setCancelled(true);
+                return;
+            }
+        }
+    }
+
+    @EventHandler
+    public void onBlockBreak(BlockBreakEvent e) {
+        if (e.isCancelled()) return;
+        Player p = e.getPlayer();
+        if (BedWars.getServerType() == ServerType.MULTIARENA) {
+            if (Objects.requireNonNull(e.getBlock().getLocation().getWorld()).getName().equalsIgnoreCase(BedWars.getLobbyWorld())) {
+                if (!isBuildSession(p)) {
+                    e.setCancelled(true);
+                    return;
+                }
+            }
+        }
+        IArena a = Arena.getArenaByPlayer(p);
+        if (a != null) {
+            if (!a.isPlayer(p)) {
+                e.setCancelled(true);
+                return;
+            }
+            if (a.getRespawnSessions().containsKey(p)) {
+                e.setCancelled(true);
+                return;
+            }
+            if (a.getStatus() != GameState.playing) {
+                e.setCancelled(true);
+                return;
+            }
+
+            // allow breaking of grass
+            // drops are removed in another event
+            switch (e.getBlock().getType().toString()) {
+                case "LONG_GRASS":
+                case "TALL_GRASS":
+                case "TALL_SEAGRASS":
+                case "SEAGRASS":
+                case "SUGAR_CANE":
+                case "SUGAR_CANE_BLOCK":
+                case "GRASS_PATH":
+                case "BROWN_MUSHROOM":
+                case "RED_MUSHROOM":
+                case "DOUBLE_PLANT":
+                    if (e.isCancelled()) {
+                        e.setCancelled(false);
+                    }
+                    return;
+                case "FIRE":
+                    if (allowFireBreak) {
+                        e.setCancelled(false);
+                        return;
+                    }
+                    break;
+            }
+
+
+            if (nms.isBed(e.getBlock().getType())) {
+                for (ITeam t : a.getTeams()) {
+                    for (int x = e.getBlock().getX() - 2; x < e.getBlock().getX() + 2; x++) {
+                        for (int y = e.getBlock().getY() - 2; y < e.getBlock().getY() + 2; y++) {
+                            for (int z = e.getBlock().getZ() - 2; z < e.getBlock().getZ() + 2; z++) {
+                                if (t.getBed().getBlockX() == x && t.getBed().getBlockY() == y && t.getBed().getBlockZ() == z) {
+                                    if (!t.isBedDestroyed()) {
+                                        if (t.isMember(p)) {
+                                            p.sendMessage(getMsg(p, Messages.INTERACT_CANNOT_BREAK_OWN_BED));
+                                            e.setCancelled(true);
+                                            if (e.getPlayer().getLocation().getBlock().getType().toString().contains("BED")) {
+                                                PaperSupport.teleport(e.getPlayer(), e.getPlayer().getLocation().add(0, 0.5, 0));
+                                            }
+                                        } else {
+                                            e.setCancelled(false);
+                                            t.setBedDestroyed(true);
+                                            t.setBedDestroyer(p);
+                                            a.addPlayerBedDestroyed(p);
+                                            PlayerBedBreakEvent breakEvent;
+                                            Bukkit.getPluginManager().callEvent(breakEvent = new PlayerBedBreakEvent(e.getPlayer(), a.getTeam(p), t, a,
+                                                    player -> {
+                                                        if (t.isMember(player)) {
+                                                            return getMsg(player, Messages.INTERACT_BED_DESTROY_CHAT_ANNOUNCEMENT_TO_VICTIM);
+                                                        } else {
+                                                            return getMsg(player, Messages.INTERACT_BED_DESTROY_CHAT_ANNOUNCEMENT);
+                                                        }
+                                                    },
+                                                    player -> {
+                                                        if (t.isMember(player)) {
+                                                            return getMsg(player, Messages.INTERACT_BED_DESTROY_TITLE_ANNOUNCEMENT);
+                                                        }
+                                                        return null;
+                                                    },
+                                                    player -> {
+                                                        if (t.isMember(player)) {
+                                                            return getMsg(player, Messages.INTERACT_BED_DESTROY_SUBTITLE_ANNOUNCEMENT);
+                                                        }
+                                                        return null;
+                                                    }));
+                                            for (Player on : a.getWorld().getPlayers()) {
+                                                if (breakEvent.getMessage() != null) {
+                                                    on.sendMessage(breakEvent.getMessage().apply(on)
+                                                            .replace("%bw_team_color%", t.getColor().chat().toString())
+                                                            .replace("%bw_team_name%", t.getDisplayName(Language.getPlayerLanguage(on)))
+                                                            .replace("%bw_player_color%", a.getTeam(p).getColor().chat().toString())
+                                                            .replace("%bw_player%", p.getDisplayName())
+                                                            .replace("%bw_playername%", p.getName()));
+                                                }
+                                                if (breakEvent.getTitle() != null && breakEvent.getSubTitle() != null) {
+                                                    nms.sendTitle(on, breakEvent.getTitle().apply(on), breakEvent.getSubTitle().apply(on), 0, 40, 10);
+                                                }
+                                                if (t.isMember(on))
+                                                    Sounds.playSound(ConfigPath.SOUNDS_BED_DESTROY_OWN, on);
+                                                else Sounds.playSound(ConfigPath.SOUNDS_BED_DESTROY, on);
+                                            }
+                                        }
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            for (Region r : a.getRegionsList()) {
+                if (r.isInRegion(e.getBlock().getLocation()) && r.isProtected()) {
+                    e.setCancelled(true);
+                    p.sendMessage(getMsg(p, Messages.INTERACT_CANNOT_BREAK_BLOCK));
+                    return;
+                }
+            }
+
+            if (!a.isMapBreakable()) {
+                if (!a.isBlockPlaced(e.getBlock())) {
+                    p.sendMessage(getMsg(p, Messages.INTERACT_CANNOT_BREAK_BLOCK));
+                    e.setCancelled(true);
+                }
+            }
+        }
+    }
+
+    /**
+     * update game signs
+     */
+    @EventHandler
+    public void onSignChange(SignChangeEvent e) {
+        if (e == null) return;
+        Player p = e.getPlayer();
+        if (Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("[" + mainCmd + "]")) {
+            File dir = new File(plugin.getDataFolder(), "/Arenas");
+            boolean exists = false;
+            if (dir.exists()) {
+                for (File f : Objects.requireNonNull(dir.listFiles())) {
+                    if (f.isFile()) {
+                        if (f.getName().contains(".yml")) {
+                            if (Objects.equals(e.getLine(1), f.getName().replace(".yml", ""))) {
+                                exists = true;
+                            }
+                        }
+                    }
+                }
+                List<String> s;
+                if (signs.getYml().get("locations") == null) {
+                    s = new ArrayList<>();
+                } else {
+                    s = new ArrayList<>(signs.getYml().getStringList("locations"));
+                }
+                if (exists) {
+                    s.add(e.getLine(1) + "," + signs.stringLocationConfigFormat(e.getBlock().getLocation()));
+                    signs.set("locations", s);
+                }
+                IArena a = Arena.getArenaByName(e.getLine(1));
+                if (a != null) {
+                    p.sendMessage("§a▪ §7Sign saved for arena: " + e.getLine(1));
+                    a.addSign(e.getBlock().getLocation());
+                    Sign b = (Sign) e.getBlock().getState();
+                    int line = 0;
+                    for (String string : BedWars.signs.getList("format")) {
+                        e.setLine(line, string.replace("[on]", String.valueOf(a.getPlayers().size())).replace("[max]",
+                                        String.valueOf(a.getMaxPlayers())).replace("[arena]", a.getDisplayName()).replace("[status]", a.getDisplayStatus(Language.getDefaultLanguage()))
+                                .replace("[type]", String.valueOf(a.getMaxInTeam())));
+                        line++;
+                    }
+                    b.update(true);
+                }
+            } else {
+                p.sendMessage("§c▪ §7You didn't set any arena yet!");
+            }
+        }
+    }
+
+    @EventHandler
+    public void onBucketFill(PlayerBucketFillEvent e) {
+        if (e.isCancelled()) return;
+        if (BedWars.getServerType() == ServerType.MULTIARENA) {
+            if (Objects.requireNonNull(e.getPlayer().getLocation().getWorld()).getName().equalsIgnoreCase(BedWars.getLobbyWorld())) {
+                if (!isBuildSession(e.getPlayer())) {
+                    e.setCancelled(true);
+                }
+            }
+        }
+        IArena a = Arena.getArenaByPlayer(e.getPlayer());
+        if (a != null) {
+            if (a.isSpectator(e.getPlayer()) || a.getStatus() != GameState.playing || a.getRespawnSessions().containsKey(e.getPlayer()))
+                e.setCancelled(true);
+        }
+    }
+
+    @EventHandler
+    public void onBucketEmpty(PlayerBucketEmptyEvent e) {
+        if (e.isCancelled()) return;
+        if (BedWars.getServerType() == ServerType.MULTIARENA) {
+            if (Objects.requireNonNull(e.getPlayer().getLocation().getWorld()).getName().equalsIgnoreCase(BedWars.getLobbyWorld())) {
+                if (!isBuildSession(e.getPlayer())) {
+                    e.setCancelled(true);
+                }
+            }
+        }
+        //Prevent player from placing during the removal from the arena
+        IArena arena = Arena.getArenaByIdentifier(e.getBlockClicked().getWorld().getName());
+        if (arena != null) {
+            if (arena.getStatus() != GameState.playing) {
+                e.setCancelled(true);
+                return;
+            }
+        }
+        Player p = e.getPlayer();
+        IArena a = Arena.getArenaByPlayer(p);
+        if (a != null) {
+            if (a.isSpectator(p)) {
+                e.setCancelled(true);
+                return;
+            }
+            if (a.getRespawnSessions().containsKey(p)) {
+                e.setCancelled(true);
+                return;
+            }
+            if (a.getStatus() != GameState.playing) {
+                e.setCancelled(true);
+                return;
+            }
+            if (e.getBlockClicked().getRelative(e.getBlockFace()).getLocation().getBlockY() >= a.getConfig().getInt(ConfigPath.ARENA_CONFIGURATION_MAX_BUILD_Y)) {
+                p.sendMessage(Language.getMsg(p, Messages.ARENA_MAX_BUILD_LIMIT_REACHED));
+                e.setCancelled(true);
+                return;
+            }
+            if (e.getBlockClicked().getRelative(e.getBlockFace()).getLocation().getBlockY() <= a.getConfig().getInt(ConfigPath.ARENA_CONFIGURATION_MIN_BUILD_Y)) {
+                e.setCancelled(true);
+                p.sendMessage(getMsg(p, Messages.ARENA_MIN_BUILD_LIMIT_REACHED));
+            }
+
+            for (Region r : a.getRegionsList()) {
+                if (r.isInRegion(e.getBlockClicked().getRelative(e.getBlockFace()).getLocation()) && r.isProtected()) {
+                    e.setCancelled(true);
+                    p.sendMessage(getMsg(p, Messages.INTERACT_CANNOT_PLACE_BLOCK));
+                    return;
+                }
+            }
+            /* Remove empty bucket */
+            Bukkit.getScheduler().runTaskLater(plugin, () -> nms.minusAmount(e.getPlayer(), e.getItemStack(), 1), 3L);
+        }
+    }
+
+
+    @EventHandler
+    public void onBlow(@NotNull EntityExplodeEvent e) {
+        if (e.isCancelled()) return;
+        if (e.blockList().isEmpty()) return;
+
+        IArena a = Arena.getArenaByIdentifier(e.getLocation().getWorld().getName());
+        if (a != null) {
+            if (a.getStatus() == GameState.playing) {
+                if (e.getEntity().getType() == EntityType.ENDER_DRAGON && a.isAllowEnderDragonDestroy()) {
+                    return;
+                }
+                Location explosionSource = e.getLocation(); // The block where the explosion started
+                e.blockList().removeIf(b ->
+                        a.isProtected(b.getLocation()) ||
+                                a.isTeamBed(b.getLocation()) ||
+                                (!a.isBlockPlaced(b) && !a.isAllowMapBreak())||
+                                isProtectedByBlastResistanceClose(b, explosionSource) ||
+                                isProtectedByBlastResistance(b, explosionSource)
+                );
+            }
+        }
+    }
+
+    @EventHandler
+    public void onBlockExplode(@NotNull BlockExplodeEvent e) {
+        if (e.isCancelled()) return;
+        if (e.blockList().isEmpty()) return;
+
+        IArena a = Arena.getArenaByIdentifier(e.blockList().get(0).getWorld().getName());
+        if (a != null && a.getStatus() == GameState.playing) {
+            Location explosionSource = e.getBlock().getLocation(); // The block where the explosion started
+            e.blockList().removeIf(b ->
+                    a.isProtected(b.getLocation()) ||
+                            a.isTeamBed(b.getLocation()) ||
+                            (!a.isBlockPlaced(b) && !a.isAllowMapBreak()) ||
+                            isProtectedByBlastResistanceClose(b, explosionSource) ||
+                            isProtectedByBlastResistance(b, explosionSource)
+            );
+        }
+    }
+
+    private boolean isProtectedByBlastResistance(Block targetBlock, Location explosionLoc) {
+        // Add offset to location vectors, prevent ray from going between blocks
+        org.bukkit.util.Vector explosionVec = explosionLoc.toVector().add(new org.bukkit.util.Vector(0.15, 0.15, 0.1));
+        org.bukkit.util.Vector targetCenter = targetBlock.getLocation().toVector().add(new org.bukkit.util.Vector(0.2, 0.1, 0.25));
+
+        // Direction vector from offset explosion location to target center
+        org.bukkit.util.Vector direction = targetCenter.clone().subtract(explosionVec);
+        double distance = direction.length();
+        direction.normalize();
+
+        org.bukkit.util.Vector current = explosionVec.clone();
+        // Step size: smaller = more accurate but more CPU
+        double step = 0.1;
+
+        for (double d = 0; d < distance; d += step) {
+            current.add(direction.clone().multiply(step));
+
+            Block b = current.toLocation(explosionLoc.getWorld()).getBlock();
+
+            if (b.getLocation().equals(targetBlock.getLocation())) continue;
+            if (b.getType() == Material.AIR) continue;
+
+            float resistance = nms.getBlastResistance(b);
+            if (resistance >= 20.0F) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isProtectedByBlastResistanceClose(Block target, Location explosionLocation) {
+        // Get direction from explosion source to target
+        org.bukkit.util.Vector direction = explosionLocation.toVector().subtract(target.getLocation().toVector()).normalize();
+
+        // Get the block on the face where the explosion hits
+        BlockFace face = getClosestFace(direction);
+        Block adjacent = target.getRelative(face);
+
+        // Define a blast resistance threshold (e.g., > 20 is strong)
+        return adjacent.getType().isSolid() && nms.getBlastResistance(adjacent) > 20;
+    }
+
+    private static final BlockFace[] FACES = {
+            BlockFace.NORTH, BlockFace.SOUTH,
+            BlockFace.EAST, BlockFace.WEST,
+            BlockFace.UP, BlockFace.DOWN
+    };
+
+    private BlockFace getClosestFace(org.bukkit.util.Vector direction) {
+        BlockFace closest = BlockFace.NORTH;
+        double highestDot = -Double.MAX_VALUE;
+
+        for (BlockFace face : FACES) {
+            org.bukkit.util.Vector faceVec = new org.bukkit.util.Vector(face.getModX(), face.getModY(), face.getModZ());
+            double dot = faceVec.normalize().dot(direction);
+            if (dot > highestDot) {
+                highestDot = dot;
+                closest = face;
+            }
+        }
+        return closest;
+    }
+
+    @EventHandler
+    public void onPaintingRemove(HangingBreakByEntityEvent e) {
+        IArena a = Arena.getArenaByIdentifier(e.getEntity().getWorld().getName());
+        if (a == null) {
+            if (BedWars.getServerType() == ServerType.SHARED) return;
+            if (!BedWars.getLobbyWorld().equals(e.getEntity().getWorld().getName())) return;
+        }
+        if (e.getEntity().getType() == EntityType.PAINTING || e.getEntity().getType() == EntityType.ITEM_FRAME) {
+            e.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.LOW)
+    public void onBlockCanBuildEvent(BlockCanBuildEvent e) {
+        if (e.isBuildable()) return;
+        IArena a = Arena.getArenaByIdentifier(e.getBlock().getWorld().getName());
+        if (a != null) {
+            boolean bed = false;
+            for (ITeam t : a.getTeams()) {
+                for (int x = e.getBlock().getX() - 1; x < e.getBlock().getX() + 1; x++) {
+                    for (int z = e.getBlock().getZ() - 1; z < e.getBlock().getZ() + 1; z++) {
+
+                        //Check bed block
+                        if (t.getBed().getBlockX() == x && t.getBed().getBlockY() == e.getBlock().getY() && t.getBed().getBlockZ() == z) {
+                            e.setBuildable(false);
+                            bed = true;
+                            break;
+                        }
+                    }
+                }
+                //Check bed hologram
+                if (t.getBed().getBlockX() == e.getBlock().getX() && t.getBed().getBlockY() + 1 == e.getBlock().getY() && t.getBed().getBlockZ() == e.getBlock().getZ()) {
+                    if (!bed) {
+                        e.setBuildable(true);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    //prevent farm breaking farm stuff
+    @EventHandler
+    public void soilChangeEntity(EntityChangeBlockEvent e) {
+        if (e.getTo() == Material.DIRT) {
+            if (e.getBlock().getType().toString().equals("FARMLAND") || e.getBlock().getType().toString().equals("SOIL")) {
+                if ((Arena.getArenaByIdentifier(e.getBlock().getWorld().getName()) != null) || (e.getBlock().getWorld().getName().equals(BedWars.getLobbyWorld())))
+                    e.setCancelled(true);
+            }
+        }
+    }
+
+    public static boolean isBuildSession(Player p) {
+        return buildSession.contains(p);
+    }
+
+    public static void addBuildSession(Player p) {
+        buildSession.add(p);
+    }
+
+    public static void removeBuildSession(Player p) {
+        buildSession.remove(p);
+    }
+}
